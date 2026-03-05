@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+import click
 import pandas as pd
 from sqlalchemy import create_engine
 from tqdm.auto import tqdm
 
-# Type parsing
 dtype = {
     "VendorID": "Int64",
     "passenger_count": "Int64",
@@ -25,51 +25,92 @@ dtype = {
     "congestion_surcharge": "float64"
 }
 
-# Date columns
 parse_dates = [
     "tpep_pickup_datetime",
     "tpep_dropoff_datetime"
 ]
 
-def run():
-    year = 2021
-    month = 1
-
-    pg_user = "root"
-    pg_pass = "root"
-    pg_host = "localhost"
-    pg_port = 5432
-    pg_database = "ny_taxi"
-
-    chunk_size=100000
-    target_table = "yellow_taxi_data"
-
-    # Link to the CSV datafile
-    prefix = 'https://github.com/DataTalksClub/nyc-tlc-data/releases/download/yellow/'
-    url = f"{prefix}/yellow_tripdata_{year}-{month:02d}.csv.gz"
-
-    # Create Database Connection
-    engine = create_engine(f'postgresql+psycopg://{pg_user}:{pg_pass}@{pg_host}:{pg_port}/{pg_database}')
-
-    # Create an iterable
+def ingest_csv(engine, url, table_name, chunksize=100000, dtype=None, parse_dates=None):
+    """
+    Stream a CSV (local path or URL) into Postgres using pandas chunks
+    Create/overwrite the table on the first chunk, then append
+    """
     df_iter = pd.read_csv(
-        prefix + "yellow_tripdata_2021-01.csv.gz",
-        dtype=dtype,
-        parse_dates=parse_dates,
+        url,
         iterator=True,
-        chunksize=chunk_size
+        chunksize=chunksize,
+        dtype=dtype,
+        parse_dates=parse_dates
     )
 
-    # Append it to Postgres database
-    first = True
-    for df_chunk in tqdm(df_iter):
+    first=True
+    for df_chunk in tqdm(df_iter, desc=f"Ingesting -> {table_name}"):
         if first:
-            # Create a table schema (no data)
-            df_chunk.head(0).to_sql(name=target_table, con=engine, if_exists="replace")
+            # Create table schema
+            df_chunk.head(0).to_sql(
+                name=table_name,
+                con=engine,
+                if_exists="replace",
+                index=False,
+            )
             first = False
+        
+        df_chunk.to_sql(
+            name=table_name,
+            con=engine,
+            if_exists="append",
+            index=False
+        )
 
-        # Insert chunk
-        df_chunk.to_sql(name=target_table, con=engine, if_exists="append")
 
-if __name__ == "__main__":
+@click.command()
+@click.option('--pg-user', default='root', help='PostgreSQL user')
+@click.option('--pg-pass', default='root', help='PostgreSQL password')
+@click.option('--pg-host', default='localhost', help='PostgreSQL host')
+@click.option('--pg-port', default=5432, type=int, help='PostgreSQL port')
+@click.option('--pg-db', default='ny_taxi', help='PostgreSQL database name')
+@click.option('--year', default=2021, type=int, help='Year of the data')
+@click.option('--month', default=1, type=int, help='Month of the data')
+@click.option('--target-table', default='yellow_taxi_data', help='Target table name')
+@click.option("--zones-table", default="zones", help="Zones lookup table")
+@click.option('--chunksize', default=100000, type=int, help='Chunk size for reading CSV')
+@click.option("--load-zones/--no-load-zones", default=True, help="Whether to load zones table")
+
+
+def run(pg_user, pg_pass, pg_host, pg_port, pg_db, year, month, target_table, zones_table, chunksize, load_zones):
+    """
+    Ingest NYC taxi trip data + zones lookup into PostgreSQL database
+    """
+    taxi_url = (
+        f"https://github.com/DataTalksClub/nyc-tlc-data/releases/download/yellow/"
+        f"yellow_tripdata_{year}-{month:02d}.csv.gz"
+    )
+
+    zones_url = (
+        "https://github.com/DataTalksClub/nyc-tlc-data/releases/download/misc/"
+        "taxi_zone_lookup.csv"
+    )
+
+    engine = create_engine(f'postgresql+psycopg://{pg_user}:{pg_pass}@{pg_host}:{pg_port}/{pg_db}')
+
+    ingest_csv(
+        engine=engine,
+        url=taxi_url,
+        table_name=target_table,
+        chunksize=chunksize,
+        dtype=dtype,
+        parse_dates=parse_dates
+    )
+
+    if load_zones:
+        ingest_csv(
+            engine=engine,
+            url=zones_url,
+            table_name=zones_table,
+            chunksize=chunksize
+        )
+
+
+if __name__ == '__main__':
     run()
+    
